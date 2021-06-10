@@ -1,0 +1,1228 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>Spinn Design: three.js webaudio - visualizer</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<link type="text/css" rel="stylesheet" href="main.css">
+		<!--  -->
+		<script src="js/libs/ammo.js"></script>
+		<!--  -->
+		<style type="text/css">
+			#overlay{
+				width: 100vw;
+				height: 100vh;
+				background: #000;
+				text-align: center;
+				display: inline-block;
+			}
+			#gallery{
+				display: inline-flex;
+			}
+			#gallery > div{
+				width: 35%;
+				margin: auto;
+				border-radius: 10px;
+				box-shadow: 0 0 10px #555;
+				overflow: hidden;
+			}
+			#gallery div img{
+				max-width: 100%;
+			}
+			#startButton{
+				padding: 10px;
+				border-radius: 20px;
+			}
+
+		</style>
+	</head>
+
+	<body>
+		<div id="overlay">
+			<div>
+				<h1>3D Music Spectrum Visualization</h1>
+				<div id="gallery">
+					<div><img src="images/Screenshot (96).png" alt=""></div>					
+					<div><img src="images/Screenshot (97).png" alt=""></div>					
+					<div><img src="images/Screenshot (98).png" alt=""></div>					
+				</div>
+			</div>
+			<div id="warning">
+				<h1>WARNING: The following scene contains flashing lights therefore it is not recommended for viewers who are sensitive to light.</h1>
+				<i>If you wish to continue, click play</i>
+			</div>
+			<div>
+				<button id="startButton">Play</button>
+			</div>
+			<hr>
+			<div>
+				<i>Real time 3d music spectrum visualisation in three js. </i>
+				<i>Made by Khamisi Kibet</i>
+			</div>
+			
+		</div>
+
+		<!-- A container to render our scene -->
+		<div id="container"></div>
+
+		<!-- Information displayed on top of container -->
+		<div id="info">
+			<a href="https://spinndesign.com" target="_blank" rel="noopener noreferrer">Effect By Spinn Design: Music visualization</a> webaudio - visualizer<br/>
+		</div>
+
+		<script type="module">
+
+			/*IMPORTS*/
+			import * as THREE from './build/three.module.js';
+			import { OrbitControls } from './jsm/controls/OrbitControls.js';
+			import { FBXLoader } from './jsm/loaders/FBXLoader.js';
+			import { Lensflare, LensflareElement } from './jsm/objects/Lensflare.js';
+			// 
+
+
+			// CLOTH SIMULATION
+			/*
+			This is how compressed textures are supposed to be used:
+
+			best for desktop:
+			BC1(DXT1) - opaque textures
+			BC3(DXT5) - transparent textures with full alpha range
+
+			best for iOS:
+			PVR2, PVR4 - opaque textures or alpha
+
+			best for Android:
+			ETC1 - opaque textures
+			ASTC_4x4, ASTC8x8 - transparent textures with full alpha range
+			*/
+
+
+
+			/*
+			 * Cloth Simulation using a relaxed constraints solver
+			 */
+
+			// Suggested Readings
+
+			// Advanced Character Physics by Thomas Jakobsen Character
+			// http://freespace.virgin.net/hugo.elias/models/m_cloth.htm
+			// http://en.wikipedia.org/wiki/Cloth_modeling
+			// http://cg.alexandra.dk/tag/spring-mass-system/
+			// Real-time Cloth Animation http://www.darwin3d.com/gamedev/articles/col0599.pdf
+
+			var params = {
+				enableWind: true,
+				tooglePins: true
+			};
+
+			var DAMPING = 0.03;
+			var DRAG = 1 - DAMPING;
+			var MASS = 0.91;
+			var restDistance = 37;
+
+			var xSegs = 10;
+			var ySegs = 10;
+
+			var clothFunction = plane( restDistance * xSegs, restDistance * ySegs );
+
+			var cloth = new Cloth( xSegs, ySegs );
+
+			var GRAVITY = 81 * 1.4;
+			var gravity = new THREE.Vector3( 0, - GRAVITY, 0 ).multiplyScalar( MASS );
+
+
+			var TIMESTEP = 18 / 1000;
+			var TIMESTEP_SQ = TIMESTEP * TIMESTEP;
+
+			var pins = [];
+
+			var windForce = new THREE.Vector3( 0, 0, 0 );
+
+			var tmpForce = new THREE.Vector3();
+
+
+			function plane( width, height ) {
+
+				return function ( u, v, target ) {
+
+					var x = ( u - 0.5 ) * width ;
+					var y = ( v + 0.5 ) * height;
+					var z = 0;
+
+					target.set( x, y, z );
+
+				};
+
+			}
+
+			function Particle( x, y, z, mass ) {
+
+				this.position = new THREE.Vector3();
+				this.previous = new THREE.Vector3();
+				this.original = new THREE.Vector3();
+				this.a = new THREE.Vector3( 0, 0, 0 ); // acceleration
+				this.mass = mass;
+				this.invMass = 1 / mass;
+				this.tmp = new THREE.Vector3();
+				this.tmp2 = new THREE.Vector3();
+
+				// init
+
+				clothFunction( x, y, this.position ); // position
+				clothFunction( x, y, this.previous ); // previous
+				clothFunction( x, y, this.original );
+
+			}
+
+			// Force -> Acceleration
+
+			Particle.prototype.addForce = function ( force ) {
+
+				this.a.add(
+					this.tmp2.copy( force ).multiplyScalar( this.invMass )
+				);
+
+			};
+
+
+			// Performs Verlet integration
+
+			Particle.prototype.integrate = function ( timesq ) {
+
+				var newPos = this.tmp.subVectors( this.position, this.previous );
+				newPos.multiplyScalar( DRAG ).add( this.position );
+				newPos.add( this.a.multiplyScalar( timesq ) );
+
+				this.tmp = this.previous;
+				this.previous = this.position;
+				this.position = newPos;
+
+				this.a.set( 0, 0, 0 );
+
+			};
+
+
+			var diff = new THREE.Vector3();
+
+			function satisfyConstraints( p1, p2, distance ) {
+
+				diff.subVectors( p2.position, p1.position );
+				var currentDist = diff.length();
+				if ( currentDist === 0 ) return; // prevents division by 0
+				var correction = diff.multiplyScalar( 1 - distance / currentDist );
+				var correctionHalf = correction.multiplyScalar( 0.5 );
+				p1.position.add( correctionHalf );
+				p2.position.sub( correctionHalf );
+
+			}
+
+
+			function Cloth( w, h ) {
+
+				w = w || 1;
+				h = h || 1;
+				this.w = w;
+				this.h = h;
+
+				var particles = [];
+				var constraints = [];
+
+				var u, v;
+
+				// Create particles
+				for ( v = 0; v <= h; v ++ ) {
+
+					for ( u = 0; u <= w; u ++ ) {
+
+						particles.push(
+							new Particle( u / w, v / h, 0, MASS )
+						);
+
+					}
+
+				}
+
+				// Structural
+
+				for ( v = 0; v < h; v ++ ) {
+
+					for ( u = 0; u < w; u ++ ) {
+
+						constraints.push( [
+							particles[ index( u, v ) ],
+							particles[ index( u, v + 1 ) ],
+							restDistance
+						] );
+
+						constraints.push( [
+							particles[ index( u, v ) ],
+							particles[ index( u + 1, v ) ],
+							restDistance
+						] );
+
+					}
+
+				}
+
+				for ( u = w, v = 0; v < h; v ++ ) {
+
+					constraints.push( [
+						particles[ index( u, v ) ],
+						particles[ index( u, v + 1 ) ],
+						restDistance
+
+					] );
+
+				}
+
+				for ( v = h, u = 0; u < w; u ++ ) {
+
+					constraints.push( [
+						particles[ index( u, v ) ],
+						particles[ index( u + 1, v ) ],
+						restDistance
+					] );
+
+				}
+
+
+				// While many systems use shear and bend springs,
+				// the relaxed constraints model seems to be just fine
+				// using structural springs.
+				// Shear
+				// var diagonalDist = Math.sqrt(restDistance * restDistance * 2);
+
+
+				// for (v=0;v<h;v++) {
+				// 	for (u=0;u<w;u++) {
+
+				// 		constraints.push([
+				// 			particles[index(u, v)],
+				// 			particles[index(u+1, v+1)],
+				// 			diagonalDist
+				// 		]);
+
+				// 		constraints.push([
+				// 			particles[index(u+1, v)],
+				// 			particles[index(u, v+1)],
+				// 			diagonalDist
+				// 		]);
+
+				// 	}
+				// }
+
+
+				this.particles = particles;
+				this.constraints = constraints;
+
+				function index( u, v ) {
+
+					return u + v * ( w + 1 );
+
+				}
+
+				this.index = index;
+
+			}
+
+			function simulate( now ) {
+
+				var windStrength = Math.cos( now / 7000 ) * 20 + 40;
+
+				windForce.set( Math.sin( now / 2000 ), Math.cos( now / 3000 ), Math.sin( now / 1000 ) );
+				windForce.normalize();
+				windForce.multiplyScalar( windStrength );
+
+				var i, j, il, particles, particle, constraints, constraint;
+
+				// Aerodynamics forces
+
+				if ( params.enableWind ) {
+
+					var indx;
+					var normal = new THREE.Vector3();
+					var indices = clothGeometry.index;
+					var normals = clothGeometry.attributes.normal;
+
+					particles = cloth.particles;
+
+					for ( i = 0, il = indices.count; i < il; i += 3 ) {
+
+						for ( j = 0; j < 3; j ++ ) {
+
+							indx = indices.getX( i + j );
+							normal.fromBufferAttribute( normals, indx );
+							tmpForce.copy( normal ).normalize().multiplyScalar( normal.dot( windForce ) );
+							particles[ indx ].addForce( tmpForce );
+
+						}
+
+					}
+
+				}
+
+				for ( particles = cloth.particles, i = 0, il = particles.length; i < il; i ++ ) {
+
+					particle = particles[ i ];
+					particle.addForce( gravity );
+
+					particle.integrate( TIMESTEP_SQ );
+
+				}
+
+				// Start Constraints
+
+				constraints = cloth.constraints;
+				il = constraints.length;
+
+				for ( i = 0; i < il; i ++ ) {
+
+					constraint = constraints[ i ];
+					satisfyConstraints( constraint[ 0 ], constraint[ 1 ], constraint[ 2 ] );
+
+				}
+
+				
+
+				// Floor Constraints
+
+				for ( particles = cloth.particles, i = 0, il = particles.length; i < il; i ++ ) {
+
+					particle = particles[ i ];
+					pos = particle.position;
+					if ( pos.y < 5 ) {
+
+						pos.y = 5;
+
+					}
+
+				}
+
+				// Pin Constraints
+
+				for ( i = 0, il = pins.length; i < il; i ++ ) {
+
+					var xy = pins[ i ];
+					var p = particles[ xy ];
+					p.position.copy( p.original );
+					p.previous.copy( p.original );
+
+				}
+
+
+			}
+
+			/* testing cloth simulation */
+			var pinsFormation = [];
+			// var pins = [ 6 ];
+
+			// pinsFormation.push( pins );
+
+			pins = [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ];
+			// pinsFormation.push( pins );
+
+			//pins = [ 0, 1, 20, 30, 40, 50, 60, 70, 80, 90, 100 ];
+			pinsFormation.push( pins );
+
+			// pins = [ 0 ];
+			// pinsFormation.push( pins );
+
+			// pins = []; // cut the rope ;)
+			// pinsFormation.push( pins );
+
+			// pins = [ 0, cloth.w ]; // classic 2 pins
+			// pinsFormation.push( pins );
+
+			// pins = [ - cloth.w, cloth.w ]; // both sides top
+			// pinsFormation.push( pins );
+
+			// pins = [ 100, cloth.w ]; // both sides top
+			// pinsFormation.push( pins );
+
+			pins = pinsFormation[ 0 ];
+
+			function togglePins() {
+
+				pins = pinsFormation[ ~ ~ ( Math.random() * pinsFormation.length ) ];
+
+			}
+
+
+
+
+
+
+			// DEFINE VARIABLES
+			var scene, camera, renderer, analyser, uniforms, light, 
+			controls, cameraTarget, boxMesh, clock, object;
+
+			// 
+			var balls = [];
+			var speakers = [];
+			var flares = [];
+			// 
+			var speed = 2.5;
+			var height = 1;
+			var offset = 0.5;
+			// 
+			var z_res = "add";
+			var y_res = "add";
+			var x_res = "add";
+			// 
+			var mixer;
+			var ready = false;
+
+			var clothGeometry, pos;
+
+			// 
+			var startButton = document.getElementById( 'startButton' );
+			// 
+			startButton.addEventListener( 'click', function () {
+
+				Ammo().then( function () {
+
+					init();
+					//animate( 0 );
+
+				} );
+
+			} );
+			// 
+			function init() {
+
+				//
+				var container = document.getElementById( 'container' );
+
+				renderer = new THREE.WebGLRenderer( { antialias: true } );
+				renderer.shadowMap.enabled = true;
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				renderer.setClearColor( 0x000000 ); //Black background color
+				renderer.setPixelRatio( window.devicePixelRatio );
+				container.appendChild( renderer.domElement );
+
+				//
+				var fftSize = 128;
+
+				//
+
+				var overlay = document.getElementById( 'overlay' );
+				overlay.remove();
+
+				//
+
+
+				scene = new THREE.Scene();
+				clock = new THREE.Clock();
+
+				camera = new THREE.Camera();
+				camera = new THREE.PerspectiveCamera( 45, window.innerWidth / window.innerHeight, 0.1, 5000 );
+
+				// Give the camera random position
+				camera.position.set( 0, Math.floor(Math.random() * 25 + 1), Math.random() + Math.random() * 10 + 20 );
+
+				cameraTarget = new THREE.Vector3( 0, 5, 0  );
+
+
+				// lights
+				var ambientLight = new THREE.AmbientLight( 0xcccccc, 0.3 );
+				scene.add( ambientLight );
+				var directionalLight = new THREE.DirectionalLight( 0xffffff, 1 );
+				directionalLight.position.set( 0, 20, 0 );
+				scene.add( directionalLight );
+
+				var d = 5;
+				directionalLight.castShadow = true;
+				directionalLight.shadow.camera.left = - d;
+				directionalLight.shadow.camera.right = d;
+				directionalLight.shadow.camera.top = d;
+				directionalLight.shadow.camera.bottom = - d;
+
+				directionalLight.shadow.camera.near = 1;
+				directionalLight.shadow.camera.far = 20;
+
+				directionalLight.shadow.mapSize.x = 1024;
+				directionalLight.shadow.mapSize.y = 1024;
+
+				//
+				// floor
+				var floorMat = new THREE.MeshStandardMaterial( {
+					roughness: 0.8,
+					color: 0xffffff,
+					metalness: 0.2,
+					bumpScale: 0.005
+				} );
+
+				var textureLoader = new THREE.TextureLoader();
+				textureLoader.load( "textures/hardwood2_diffuse.jpg", function ( map ) {
+
+					map.wrapS = THREE.RepeatWrapping;
+					map.wrapT = THREE.RepeatWrapping;
+					map.anisotropy = 16;
+					map.repeat.set( 30, 25 );
+					map.encoding = THREE.sRGBEncoding;
+					floorMat.map = map;
+					floorMat.needsUpdate = true;
+
+				} );
+				textureLoader.load( "textures/hardwood2_bump.jpg", function ( map ) {
+
+					map.wrapS = THREE.RepeatWrapping;
+					map.wrapT = THREE.RepeatWrapping;
+					map.anisotropy = 4;
+					map.repeat.set( 30, 25 );;
+					floorMat.bumpMap = map;
+					floorMat.needsUpdate = true;
+
+				} );
+				textureLoader.load( "textures/hardwood2_roughness.jpg", function ( map ) {
+
+					map.wrapS = THREE.RepeatWrapping;
+					map.wrapT = THREE.RepeatWrapping;
+					map.anisotropy = 4;
+					map.repeat.set( 30, 25 );
+					floorMat.roughnessMap = map;
+					floorMat.needsUpdate = true;
+
+				} );
+
+				var floorGeometry = new THREE.PlaneBufferGeometry( 100, 100 );
+				var floorMesh = new THREE.Mesh( floorGeometry, floorMat );
+				floorMesh.receiveShadow = true;
+				floorMesh.rotation.x = Math.PI * - 0.5;
+				scene.add( floorMesh );
+				// 
+
+				// LOGO
+				var logoMat = new THREE.MeshStandardMaterial( {
+					roughness: 1,
+					color: 0xffffff,
+					bumpScale: 0.02,
+					metalness: 0
+				} );
+
+				textureLoader.load( "textures/sd_logo/spinn_dessign_plain_logo.png", function ( map ) {
+
+					map.wrapS = THREE.RepeatWrapping;
+					map.wrapT = THREE.RepeatWrapping;
+					map.anisotropy = 30;
+					map.repeat.set( 1, 1 );
+					map.encoding = THREE.sRGBEncoding;
+					logoMat.map = map;
+					logoMat.needsUpdate = true;
+
+				} );
+
+				textureLoader.load( "textures/sd_logo/spinn_dessign_plain_logo.png", function ( map ) {
+
+					map.wrapS = THREE.RepeatWrapping;
+					map.wrapT = THREE.RepeatWrapping;
+					map.anisotropy = 30;
+					map.repeat.set( 1, 1 );
+					logoMat.bumpMap = map;
+					logoMat.needsUpdate = true;
+
+				} );
+
+				// Logo podium
+				var logoGeometry = new THREE.BoxBufferGeometry( 2, 2, 2 );				
+				var logoMesh = new THREE.Mesh( logoGeometry, logoMat );
+				logoMesh.position.set( 0, 0, 0 );
+				logoMesh.castShadow = true;
+				scene.add( logoMesh );
+
+				// 
+
+				// LOAD AUDIO
+				var listener = new THREE.AudioListener();
+				var audio = new THREE.Audio( listener );
+				
+				//var file = './copyrighted/Jason Derulo - Take You Dancing _Official Dance Video_ ( 128kbps ).mp3';
+				var file = './models/mmd/audios/Righten - Dynamo.m4a';
+
+				// PLAY AUDIO FILE
+				if ( /(iPad|iPhone|iPod)/g.test( navigator.userAgent ) ) {
+
+					var loader = new THREE.AudioLoader();
+					loader.load( file, function ( buffer ) {
+
+						audio.setBuffer( buffer );
+
+						audio.play();
+
+					} );
+
+				} else {
+
+					var mediaElement = new Audio( file );
+					mediaElement.loop = true;
+
+					mediaElement.play();
+
+					audio.setMediaElementSource( mediaElement );
+
+				}
+
+				//  AUDIO ANALYZER
+				analyser = new THREE.AudioAnalyser( audio, fftSize );
+				//
+				uniforms = {
+					tAudioData: { value: new THREE.DataTexture( analyser.data, fftSize / 2, 1, THREE.LuminanceFormat ) }
+				};	
+
+				// LOAD MODEL
+				var loader = new FBXLoader();
+				loader.load( 'models/fbx/Samba Dancing.fbx', function ( object ) {
+
+					mixer = new THREE.AnimationMixer( object );
+
+					var action = mixer.clipAction( object.animations[ 0 ] );
+					action.play();
+
+					object.traverse( function ( child ) {
+
+						if ( child.isMesh ) {
+
+							child.castShadow = true;
+							child.receiveShadow = true;
+
+						}
+
+					} );
+
+					object.scale.set( 0.009, 0.009, 0.009 );
+					object.position.set( 0, 1, 0 );
+
+					scene.add( object );
+
+					ready = true;
+
+				} );
+
+				//ADD BALLS AND 'SPEAKERS'
+				var radius = 5;
+
+				var ballGeometry = new THREE.SphereBufferGeometry( 0.2, 32, 16 );
+				ballGeometry.translate( 0, 0.3, 0 );
+
+				//  r , b, h, sides, t
+				// create objects when audio buffer is loaded
+
+				for ( var i = 0; i < uniforms.tAudioData.value.image.data.length; i ++ ) {
+
+					var s = i / uniforms.tAudioData.value.image.data.length * Math.PI * 2;
+
+					var speakerMaterial = new THREE.MeshStandardMaterial();
+					speakerMaterial.roughness = 0.5 * Math.random();
+					speakerMaterial.metalness =  0.5;
+					speakerMaterial.color.setHSL( Math.random(), 1.0, 0.5 );
+
+					var speaker = new THREE.Mesh( new THREE.CylinderBufferGeometry( 0.2, 0.1, 0.2, 100, 0.2 ), speakerMaterial );
+					speaker.castShadow = true;
+
+					speaker.position.x = radius * Math.cos( s );
+					speaker.position.z = radius * Math.sin( s );
+
+					//
+
+					var ballMaterial = new THREE.MeshStandardMaterial();
+					ballMaterial.roughness = 0.5 * Math.random() + 0.25;
+					ballMaterial.metalness =  0.5;
+					ballMaterial.color.setHSL( Math.random(), 1.0, 0.3 );
+
+					var ball = new THREE.Mesh( ballGeometry, ballMaterial );
+					ball.castShadow = true;
+					ball.userData.down = false;
+
+					ball.position.x = radius * Math.cos( s );
+					ball.position.z = radius * Math.sin( s );
+
+					scene.add( ball );
+					scene.add( speaker );
+					speakers.push( speaker );
+					balls.push( ball );
+
+				}
+				
+				// BRICK WALL
+				// Brick material
+				var cubeMat = new THREE.MeshStandardMaterial( {
+					roughness: 0.9,
+					color: 0xffffff,
+					bumpScale: 0.002,
+					metalness: 0.1
+				} );
+
+				textureLoader.load( "textures/material/free_wall_texture_design_instruct_04.jpg", function ( map ) {
+
+					map.wrapS = THREE.RepeatWrapping;
+					map.wrapT = THREE.RepeatWrapping;
+					map.anisotropy = 10;
+					map.repeat.set( 1, 5 );
+					map.encoding = THREE.sRGBEncoding;
+					cubeMat.map = map;
+					cubeMat.needsUpdate = true;
+
+				} );
+
+				textureLoader.load( "textures/material/free_wall_texture_design_instruct_04.jpg", function ( map ) {
+
+					map.wrapS = THREE.RepeatWrapping;
+					map.wrapT = THREE.RepeatWrapping;
+					map.anisotropy = 10;
+					map.repeat.set(1, 10 );
+					cubeMat.bumpMap = map;
+					cubeMat.needsUpdate = true;
+
+				} );
+
+				// Walls
+				var boxGeometry = new THREE.BoxBufferGeometry( 20, 20, .3);
+
+				var boxMesh = new THREE.Mesh( boxGeometry, cubeMat );
+				boxMesh.position.set( 0, 0, -10 );
+				boxMesh.castShadow = true;
+				scene.add( boxMesh );
+
+				var boxMesh = new THREE.Mesh( boxGeometry, cubeMat );
+				boxMesh.position.set( 0, 0, 10 );
+				boxMesh.castShadow = true;
+				scene.add( boxMesh );
+
+				var boxGeometry = new THREE.BoxBufferGeometry( .3, 20, 20);
+
+				var boxMesh = new THREE.Mesh( boxGeometry, cubeMat );
+				boxMesh.position.set( -10, 0, 0 );
+				boxMesh.castShadow = true;
+				scene.add( boxMesh );
+
+				// 
+
+				// poles
+				var poleGeo = new THREE.BoxBufferGeometry( 1, 20, 1 );
+				var poleMat = new THREE.MeshLambertMaterial();
+
+				var mesh = new THREE.Mesh( poleGeo, poleMat );
+				mesh.position.x =  10;
+				mesh.position.z = - 10;
+				mesh.receiveShadow = true;
+				mesh.castShadow = true;
+				scene.add( mesh );
+
+				var mesh = new THREE.Mesh( poleGeo, poleMat );
+				mesh.position.x = 10;
+				mesh.position.z =  10;
+				mesh.receiveShadow = true;
+				mesh.castShadow = true;
+				scene.add( mesh );
+
+				var mesh = new THREE.Mesh( new THREE.BoxBufferGeometry( 0.5, 0.5, 20 ), poleMat );
+				mesh.position.y = 10;
+				mesh.position.x = 10;
+				mesh.position.z = 0;
+				mesh.receiveShadow = true;
+				mesh.castShadow = true;
+				scene.add( mesh );
+
+				var gg = new THREE.BoxBufferGeometry( 2, 2, 2 );
+				var mesh = new THREE.Mesh( gg, poleMat );
+				mesh.position.y = 0;
+				mesh.position.x = 10;
+				mesh.position.z = 10;
+				mesh.receiveShadow = true;
+				mesh.castShadow = true;
+				scene.add( mesh );
+
+				var mesh = new THREE.Mesh( gg, poleMat );
+				mesh.position.y = 0;
+				mesh.position.x = 10;
+				mesh.position.z = - 10;
+				mesh.receiveShadow = true;
+				mesh.castShadow = true;
+				scene.add( mesh );
+				// 
+
+				// 
+				// cloth material
+				var clothTexture = textureLoader.load( 'textures/sd_logo/night_mode_3d_spinn_design.png' );
+				clothTexture.anisotropy = 20;
+
+				var clothMaterial = new THREE.MeshLambertMaterial( {
+					map: clothTexture,
+					side: THREE.DoubleSide,
+					alphaTest: 0.5
+				} );
+
+
+				// cloth geometry
+				clothGeometry = new THREE.ParametricBufferGeometry( clothFunction, cloth.w, cloth.h );
+
+				// cloth mesh
+				object = new THREE.Mesh( clothGeometry, clothMaterial );
+				object.position.set( 10, - 0.2, 0 );
+				object.scale.set(0.05, 0.05, 0.05);
+				object.rotation.y = 1.5;
+				object.castShadow = true;
+				scene.add( object );
+
+				object.customDepthMaterial = new THREE.MeshDepthMaterial( {
+					depthPacking: THREE.RGBADepthPacking,
+					map: clothTexture,
+					alphaTest: 0.5
+				} );
+				// 
+
+				// 
+				
+				// lights
+				var dirLight = new THREE.DirectionalLight( 0xffffff, 0.05 );
+				dirLight.position.set( 0, - 1, 0 ).normalize();
+				dirLight.color.setHSL( 0.1, 0.7, 0.5 );
+				scene.add( dirLight );
+
+				// Flare lights
+				addLight( Math.random(), 0.9, 0.5, 10, 11, - 10 );
+				addLight( Math.random(), 0.8, 0.5, - 10, 11, - 10 );
+				addLight( Math.random(), 0.8, 0.5, - 10, 11, 10 );
+				addLight( Math.random(), 0.8, 0.5, 10, 11, 10 );
+
+				// 
+
+				animate( 0 );
+				
+
+				var controls = new OrbitControls( camera, renderer.domElement );
+				controls.minDistance = 1;
+				controls.maxDistance = 100;
+
+				//
+
+				window.addEventListener( 'resize', onResize, false );
+
+			}
+
+			// lensflares
+			var textureLoader = new THREE.TextureLoader();
+
+			var textureFlare0 = textureLoader.load( 'textures/lensflare/lensflare0.png' );
+			var textureFlare1 = textureLoader.load( 'textures/lensflare/lensflare1.png' );
+			var textureFlare2 = textureLoader.load( 'textures/lensflare/lensflare2.png' );
+			var textureFlare3 = textureLoader.load( 'textures/lensflare/lensflare3.png' );
+
+			function addLight( h, s, l, x, y, z ) {
+
+				var light = new THREE.PointLight( 0xffffff, 1.5, 20 );
+				light.color.setHSL( h, s, l );
+				light.position.set( x, y, z );
+				scene.add( light );
+
+				var lensflare = new Lensflare();
+				lensflare.addElement( new LensflareElement( textureFlare0, 500, 0, light.color ) );
+				lensflare.addElement( new LensflareElement( textureFlare3, 20, 0 ) );
+				lensflare.addElement( new LensflareElement( textureFlare0, 40, 0 ) );
+				lensflare.addElement( new LensflareElement( textureFlare2, 60, 0 ) );
+				lensflare.addElement( new LensflareElement( textureFlare3, 40, 0 ) );
+				light.add( lensflare );
+				flares.push(light)
+
+			}
+
+			function onResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+			function animate( now ) {
+
+				requestAnimationFrame( animate );
+				simulate( now );
+
+				var delta = clock.getDelta();
+
+				if ( mixer ) mixer.update( delta / 0.8 );
+
+
+				var time = Date.now() * 0.001;
+
+
+				render();
+
+			}
+
+			function render() {
+				// Cloth
+				var p = cloth.particles;
+
+				for ( var i = 0, il = p.length; i < il; i ++ ) {
+
+					var v = p[ i ].position;
+
+					clothGeometry.attributes.position.setXYZ( i, v.x, v.y, v.z );
+
+				}
+
+				clothGeometry.attributes.position.needsUpdate = true;
+
+				clothGeometry.computeVertexNormals();
+
+				analyser.getFrequencyData();
+				// Audio listener
+				uniforms.tAudioData.value.needsUpdate = true;
+				//console.log(uniforms.tAudioData.value);
+				
+
+				var time = clock.getElapsedTime();
+
+				for ( var i = 0; i < balls.length; i ++ ) {
+
+					var ball = balls[ i ];
+
+					var speaker = speakers[ i ];
+
+					var previousHeight = ball.position.y;
+					// Change ball position
+					ball.position.y = Math.abs( Math.sin( i * offset + ( time * speed ) ) * height * (uniforms.tAudioData.value.image.data[i] * 0.03) );					
+					// Scale speakers
+					speaker.scale.y = Math.abs( Math.sin( i * offset + ( time * speed ) ) * (uniforms.tAudioData.value.image.data[i] * 0.05) * 0.9 );
+
+					if ( ball.position.y < previousHeight ) {
+
+						ball.userData.down = false;
+
+					} else {
+
+						if ( ball.userData.down === true ) {
+
+							// ball changed direction from down to up
+							ball.userData.down = false;
+
+						}
+
+					}
+
+				}
+				// Change flare colors and intensity
+				for (var i = flares.length - 1; i >= 0; i--) {
+					flares[i].color.setHSL( Math.random() * (Math.abs( Math.sin( i * offset + ( time * speed ) ) * height * (uniforms.tAudioData.value.image.data[i] * 0.03) ) ) * 0.05, Math.random(), Math.random() * 0.5 );
+					flares[i].intensity =  uniforms.tAudioData.value.image.data[Math.floor(Math.random() * 30 + 1)] * 0.01;
+				}
+
+				// Animate camera
+				if (camera.position.x > 9.5) {
+					x_res = "sub";					
+				}else if (camera.position.z < - 9.5){
+					x_res = "add";
+				}
+
+				if (x_res === "add") {
+					if (camera.position.x < 9.5) {
+						camera.position.x = camera.position.x + 0.005;
+					}else{
+						camera.position.x = camera.position.x + 0.004;
+					}
+				}else{
+					if (camera.position.x > - 9.5) {
+						camera.position.x = camera.position.x - 0.01;
+					}else{
+						camera.position.x = camera.position.x + 0.004;
+						x_res = "add";
+					}
+				}				
+
+				if (camera.position.y > 10) {
+					y_res = "sub";					
+				}else if (camera.position.z < 0){
+					y_res = "add";
+				}
+
+				if (y_res === "add") {
+					if (camera.position.y < 0) {
+						camera.position.y = camera.position.y + 0.01;
+					}else{
+						camera.position.y = camera.position.y + 0.02;
+					}
+					
+				}else{
+					if (camera.position.y < 0) {
+						y_res = "add";
+						
+					}	
+					camera.position.y = camera.position.y - 0.01;				
+				}
+
+				if (camera.position.z > 9.5) {
+					z_res = "sub";					
+				}else if (camera.position.z < - 9.5){
+					z_res = "add";
+				}
+
+				if (z_res === "add") {
+					camera.position.z = camera.position.z + 0.01;
+				}else{
+					camera.position.z = camera.position.z - 0.01;
+				}
+				
+				
+				//console.log(camera.position.x, camera.position.y, camera.position.z)
+
+				camera.lookAt( cameraTarget );
+
+				renderer.render( scene, camera );
+
+			}
+
+		</script>
+
+	</body>
+</html>
+<style type="text/css">
+	.sd_pages_flt_cont{
+		position: fixed;
+		bottom: 10px;
+		right: 10px;
+		background: rgba(0,0,0,.3);
+		padding: 10px;
+		cursor: pointer;
+		font-weight: bold;
+		color: #fff !important;
+		border-radius: 10px;
+		box-shadow: 0 0 20px #000;
+	}
+	.sd_pages_flt_cont a{
+		text-decoration: none;
+		color: inherit;
+	}
+	.sd_pages_flt_cont ul{
+		display: none;
+	}
+	.sd_pages_flt_cont ul li{
+		margin: 5px auto;
+		padding: 5px;
+		background: #fff;
+		color: #000;
+	}
+	.sd_pages_flt_cont:hover ul{
+		display: list-item;
+		position: absolute;
+		bottom: 0;
+		min-width: 100%;
+		padding: inherit;
+		right: 0;
+		list-style: none;
+		background: inherit;
+		font-weight: normal;
+		background: rgba(0,0,0,.9);
+		padding: 5px 10px;
+		margin: 15px auto;
+	}
+	 .sd_pages_flt_cont:hover div{
+	 	display: inline-block;
+	 }
+</style>
+<div class="sd_pages_flt_cont">
+	<div>
+		<div style="color: #000">< / ></div>
+		<ul>
+			<li><u><b>Powered By Spinn Design</b></u></li>
+		   <li><b><a href="https://www.spinndesign.com" target="_blank">Spinn Design <i class="fas fa-home"></i> Home</a></b></li>
+		   <li id="sd_el_href"></li> 
+		   <li>
+		   		<span class="more"><b>Disclaimer:</b> Spinn Design is not a web hosting service and all contents available in domains https://spinndesign.com/pages/... is totally up to files uploader's controll.</span><br>
+		   		<span class="more">Report any misconduct you notice to <b>info@spinndesign.com</b></span><br><hr>
+		   		<h6>Copyright Spinn Design 2020</h6>
+		   </li>
+		</ul>
+	</div>
+</div>
+
+<script type="text/javascript">
+	var id = location.pathname.slice(1).split("/")[1];
+	var ur = "https://www.spinndesign.com/designs/"+id;
+	var el = document.getElementById('sd_el_href');
+	el.innerHTML = `<a href="${ur}">Download Page Source</a>`;
+</script><!-- Global site tag (gtag.js) - Google Analytics -->
+																		    <script async src='https://www.googletagmanager.com/gtag/js?id=UA-169054170-1'></script>
+																		    <script>
+																		      window.dataLayer = window.dataLayer || [];
+																		      function gtag(){dataLayer.push(arguments);}
+																		      gtag('js', new Date());
+
+																		      gtag('config', 'UA-169054170-1');
+																		    </script><style type="text/css">
+	.sd_pages_flt_cont{
+		position: fixed;
+		bottom: 10px;
+		right: 10px;
+		background: rgba(0,0,0,.3);
+		padding: 10px;
+		cursor: pointer;
+		font-weight: bold;
+		color: #fff !important;
+		border-radius: 10px;
+		box-shadow: 0 0 20px #000;
+	}
+	.sd_pages_flt_cont a{
+		text-decoration: none;
+		color: inherit;
+	}
+	.sd_pages_flt_cont ul{
+		display: none;
+	}
+	.sd_pages_flt_cont ul li{
+		margin: 5px auto;
+		padding: 5px;
+		background: #fff;
+		color: #000;
+	}
+	.sd_pages_flt_cont:hover ul{
+		display: list-item;
+		position: absolute;
+		bottom: 0;
+		min-width: 100%;
+		padding: inherit;
+		right: 0;
+		list-style: none;
+		background: inherit;
+		font-weight: normal;
+		background: rgba(0,0,0,.9);
+		padding: 5px 10px;
+		margin: 15px auto;
+	}
+	 .sd_pages_flt_cont:hover div{
+	 	display: inline-block;
+	 }
+</style>
+<div class="sd_pages_flt_cont">
+	<div>
+		<div style="color: #000">< / ></div>
+		<ul>
+			<li><u><b>Powered By Spinn Design</b></u></li>
+		   <li><b><a href="https://www.spinndesign.com" target="_blank">Spinn Design <i class="fas fa-home"></i> Home</a></b></li>
+		   <li id="sd_el_href"></li> 
+		   <li>
+		   		<span class="more"><b>Disclaimer:</b> Spinn Design is not a web hosting service and all contents available in domains https://spinndesign.com/pages/... is totally up to files uploader's controll.</span><br>
+		   		<span class="more">Report any misconduct you notice to <b>info@spinndesign.com</b></span><br><hr>
+		   		<h6>Copyright Spinn Design 2020</h6>
+		   </li>
+		</ul>
+	</div>
+</div>
+
+<script type="text/javascript">
+	var id = location.pathname.slice(1).split("/")[1];
+	var ur = "https://www.spinndesign.com/designs/"+id;
+	var el = document.getElementById('sd_el_href');
+	el.innerHTML = `<a href="${ur}">Download Page Source</a>`;
+</script><!-- Global site tag (gtag.js) - Google Analytics -->
+																		    <script async src='https://www.googletagmanager.com/gtag/js?id=UA-169054170-1'></script>
+																		    <script>
+																		      window.dataLayer = window.dataLayer || [];
+																		      function gtag(){dataLayer.push(arguments);}
+																		      gtag('js', new Date());
+
+																		      gtag('config', 'UA-169054170-1');
+																		    </script>

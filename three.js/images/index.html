@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+																<html>
+																<head>
+																	<title>Spnn Design</title>
+																	<link rel='stylesheet' type='text/css' href='https://www.spinndesign.com/css/style.css'>
+																</head>
+																<body>
+																	<header class='header dynamic_relative' data-dynamic='true'>
+																		<div class='header_logo left'>
+																			<a href='https://www.spinndesign.com'>
+																				<img src='https://www.spinndesign.com/img/spinn_dessign_plain_logo.png' alt='logo'>
+																			</a>
+																		</div>
+																		<span class='header_btn' onclick='loading()'>
+																			<a href='https://www.spinndesign.com'>Back</a>
+																		</span>
+																	</header>
+																</body>
+																</html><style type="text/css">
+	.sd_pages_flt_cont{
+		position: fixed;
+		bottom: 10px;
+		right: 10px;
+		background: rgba(0,0,0,.3);
+		padding: 10px;
+		cursor: pointer;
+		font-weight: bold;
+		color: #fff !important;
+		border-radius: 10px;
+		box-shadow: 0 0 20px #000;
+	}
+	.sd_pages_flt_cont a{
+		text-decoration: none;
+		color: inherit;
+	}
+	.sd_pages_flt_cont ul{
+		display: none;
+	}
+	.sd_pages_flt_cont ul li{
+		margin: 5px auto;
+		padding: 5px;
+		background: #fff;
+		color: #000;
+	}
+	.sd_pages_flt_cont:hover ul{
+		display: list-item;
+		position: absolute;
+		bottom: 0;
+		min-width: 100%;
+		padding: inherit;
+		right: 0;
+		list-style: none;
+		background: inherit;
+		font-weight: normal;
+		background: rgba(0,0,0,.9);
+		padding: 5px 10px;
+		margin: 15px auto;
+	}
+	 .sd_pages_flt_cont:hover div{
+	 	display: inline-block;
+	 }
+</style>
+<div class="sd_pages_flt_cont">
+	<div>
+		<div style="color: #000">< / ></div>
+		<ul>
+			<li><u><b>Powered By Spinn Design</b></u></li>
+		   <li><b><a href="https://www.spinndesign.com" target="_blank">Spinn Design <i class="fas fa-home"></i> Home</a></b></li>
+		   <li id="sd_el_href"></li> 
+		   <li>
+		   		<span class="more"><b>Disclaimer:</b> Spinn Design is not a web hosting service and all contents available in domains https://spinndesign.com/pages/... is totally up to files uploader's controll.</span><br>
+		   		<span class="more">Report any misconduct you notice to <b>info@spinndesign.com</b></span><br><hr>
+		   		<h6>Copyright Spinn Design 2020</h6>
+		   </li>
+		</ul>
+	</div>
+</div>
+
+<script type="text/javascript">
+	var id = location.pathname.slice(1).split("/")[1];
+	var ur = "https://www.spinndesign.com/designs/"+id;
+	var el = document.getElementById('sd_el_href');
+	el.innerHTML = `<a href="${ur}">Download Page Source</a>`;
+</script><!-- Global site tag (gtag.js) - Google Analytics -->
+																		    <script async src='https://www.googletagmanager.com/gtag/js?id=UA-169054170-1'></script>
+																		    <script>
+																		      window.dataLayer = window.dataLayer || [];
+																		      function gtag(){dataLayer.push(arguments);}
+																		      gtag('js', new Date());
+
+																		      gtag('config', 'UA-169054170-1');
+																		    </script>

@@ -1,0 +1,1163 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<title>three.js webgl - FBX loader</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<link type="text/css" rel="stylesheet" href="main.css">
+		<script src="./js/libs/ammo.js" type="text/javascript"></script>
+	</head>
+
+	<body>
+		<div id="overlay">
+			<h4>This page is not recommended for viewing on low performance devices. Click play to continue</h4><br>
+			<button id="startButton">Play</button>
+		</div>
+
+		<script type="module">
+
+			import * as THREE from './build/three.module.js';
+			import Stats from './jsm/libs/stats.module.js';
+			import { OrbitControls } from './jsm/controls/OrbitControls.js';
+			import { FBXLoader } from './jsm/loaders/FBXLoader.js';
+			import { ColladaLoader } from './jsm/loaders/ColladaLoader.js';
+			import { GUI } from './jsm/libs/dat.gui.module.js';
+			import { MMDAnimationHelper } from './jsm/animation/MMDAnimationHelper.js';
+
+			// 
+
+			/*
+			 * Cloth Simulation using a relaxed constraints solver
+			 */
+
+			// Suggested Readings
+
+			// Advanced Character Physics by Thomas Jakobsen Character
+			// http://freespace.virgin.net/hugo.elias/models/m_cloth.htm
+			// http://en.wikipedia.org/wiki/Cloth_modeling
+			// http://cg.alexandra.dk/tag/spring-mass-system/
+			// Real-time Cloth Animation http://www.darwin3d.com/gamedev/articles/col0599.pdf
+
+			var params = {
+				enableWind: true,
+			};
+
+			var DAMPING = 0.03;
+			var DRAG = 1 - DAMPING;
+			var MASS = 0.1;
+			var restDistance = 50
+
+			var xSegs = 120;
+			var ySegs = 40;
+
+			var clothFunction = plane( restDistance * xSegs, restDistance * ySegs );
+
+			var cloth = new Cloth( xSegs, ySegs );
+
+			var GRAVITY = 400 * 1.4;
+			var gravity = new THREE.Vector3( 0, - GRAVITY, 0 ).multiplyScalar( MASS );
+
+
+			var TIMESTEP = 18 / 1000;
+			var TIMESTEP_SQ = TIMESTEP * TIMESTEP;
+
+			var pins = [];
+
+			var windForce = new THREE.Vector3( 0, 0, 0 );
+
+			var tmpForce = new THREE.Vector3();
+
+
+			function plane( width, height ) {
+
+				return function ( u, v, target ) {
+
+					var x = ( u - 0.5 ) * width;
+					var y = ( v + 0.5 ) * height;
+					var z = 0;
+
+					target.set( x, y, z );
+
+				};
+
+			}
+
+			function Particle( x, y, z, mass ) {
+
+				this.position = new THREE.Vector3();
+				this.previous = new THREE.Vector3();
+				this.original = new THREE.Vector3();
+				this.a = new THREE.Vector3( 0, 0, 0 ); // acceleration
+				this.mass = mass;
+				this.invMass = 1 / mass;
+				this.tmp = new THREE.Vector3();
+				this.tmp2 = new THREE.Vector3();
+
+				// init
+
+				clothFunction( x, y, this.position ); // position
+				clothFunction( x, y, this.previous ); // previous
+				clothFunction( x, y, this.original );
+
+			}
+
+			// Force -> Acceleration
+			Particle.prototype.addForce = function ( force ) {
+
+				this.a.add(
+					this.tmp2.copy( force ).multiplyScalar( this.invMass )
+				);
+
+			};
+
+
+			// Performs Verlet integration
+			Particle.prototype.integrate = function ( timesq ) {
+
+				var newPos = this.tmp.subVectors( this.position, this.previous );
+				newPos.multiplyScalar( DRAG ).add( this.position );
+				newPos.add( this.a.multiplyScalar( timesq ) );
+
+				this.tmp = this.previous;
+				this.previous = this.position;
+				this.position = newPos;
+
+				this.a.set( 0, 100, 0 );
+
+			};
+
+
+			var diff = new THREE.Vector3();
+
+			function satisfyConstraints( p1, p2, distance ) {
+
+				diff.subVectors( p2.position, p1.position );
+				var currentDist = diff.length();
+				if ( currentDist === 0 ) return; // prevents division by 0
+				var correction = diff.multiplyScalar( 1 - distance / currentDist );
+				var correctionHalf = correction.multiplyScalar( 0.5 );
+				p1.position.add( correctionHalf );
+				p2.position.sub( correctionHalf );
+
+			}
+
+
+			function Cloth( w, h ) {
+
+				w = w || 10;
+				h = h || 10;
+				this.w = w;
+				this.h = h;
+
+				var particles = [];
+				var constraints = [];
+
+				var u, v;
+
+				// Create particles
+				for ( v = 0; v <= h; v ++ ) {
+
+					for ( u = 0; u <= w; u ++ ) {
+
+						particles.push(
+							new Particle( u / w, v / h, 0, MASS )
+						);
+
+					}
+
+				}
+
+				// Structural
+
+				for ( v = 0; v < h; v ++ ) {
+
+					for ( u = 0; u < w; u ++ ) {
+
+						constraints.push( [
+							particles[ index( u, v ) ],
+							particles[ index( u, v + 1 ) ],
+							restDistance
+						] );
+
+						constraints.push( [
+							particles[ index( u, v ) ],
+							particles[ index( u + 1, v ) ],
+							restDistance
+						] );
+
+					}
+
+				}
+
+				for ( u = w, v = 0; v < h; v ++ ) {
+
+					constraints.push( [
+						particles[ index( u, v ) ],
+						particles[ index( u, v + 1 ) ],
+						restDistance
+
+					] );
+
+				}
+
+				for ( v = h, u = 0; u < w; u ++ ) {
+
+					constraints.push( [
+						particles[ index( u, v ) ],
+						particles[ index( u + 1, v ) ],
+						restDistance
+					] );
+
+				}
+
+
+				// While many systems use shear and bend springs,
+				// the relaxed constraints model seems to be just fine
+				// using structural springs.
+				// Shear
+				// var diagonalDist = Math.sqrt(restDistance * restDistance * 2);
+
+
+				// for (v=0;v<h;v++) {
+				// 	for (u=0;u<w;u++) {
+
+				// 		constraints.push([
+				// 			particles[index(u, v)],
+				// 			particles[index(u+1, v+1)],
+				// 			diagonalDist
+				// 		]);
+
+				// 		constraints.push([
+				// 			particles[index(u+1, v)],
+				// 			particles[index(u, v+1)],
+				// 			diagonalDist
+				// 		]);
+
+				// 	}
+				// }
+
+
+				this.particles = particles;
+				this.constraints = constraints;
+
+				function index( u, v ) {
+
+					return u + v * ( w + 1 );
+
+				}
+
+				this.index = index;
+
+			}
+
+			function simulate( now ) {
+
+				var windStrength = Math.cos( now / 7000 ) * 20 + 40;
+
+				windForce.set( Math.sin( now / 2000 ), Math.cos( now / 3000 ), Math.sin( now / 1000 ) );
+				windForce.normalize();
+				windForce.multiplyScalar( windStrength );
+
+				var i, j, il, particles, particle, constraints, constraint;
+
+				// Aerodynamics forces
+
+				if ( params.enableWind ) {
+
+					var indx;
+					var normal = new THREE.Vector3();
+					var indices = clothGeometry.index;
+					var normals = clothGeometry.attributes.normal;
+
+					particles = cloth.particles;
+
+					for ( i = 0, il = indices.count; i < il; i += 3 ) {
+
+						for ( j = 0; j < 3; j ++ ) {
+
+							indx = indices.getX( i + j );
+							normal.fromBufferAttribute( normals, indx );
+							tmpForce.copy( normal ).normalize().multiplyScalar( normal.dot( windForce ) );
+							particles[ indx ].addForce( tmpForce );
+
+						}
+
+					}
+
+				}
+
+				for ( particles = cloth.particles, i = 0, il = particles.length; i < il; i ++ ) {
+
+					particle = particles[ i ];
+					particle.addForce( gravity );
+
+					particle.integrate( TIMESTEP_SQ );
+
+				}
+
+				// Start Constraints
+
+				constraints = cloth.constraints;
+				il = constraints.length;
+
+				for ( i = 0; i < il; i ++ ) {
+
+					constraint = constraints[ i ];
+					satisfyConstraints( constraint[ 0 ], constraint[ 1 ], constraint[ 2 ] );
+
+				}
+
+				// Floor Constraints
+				for ( particles = cloth.particles, i = 0, il = particles.length; i < il; i ++ ) {
+
+					particle = particles[ i ];
+					pos = particle.position;
+					if ( pos.y < 0 ) {
+
+						pos.y = 10;
+
+					}
+
+				}
+
+				// Pin Constraints
+				for ( i = 0, il = pins.length; i < il; i ++ ) {
+
+					var xy = pins[ i ];
+					var p = particles[ xy ];
+					p.position.copy( p.original );
+					p.previous.copy( p.original );
+
+				}
+
+
+			}
+
+			/* testing cloth simulation */
+			var pinsFormation = [];
+			// var pins = [ 6 ];
+
+			// pinsFormation.push( pins );
+
+			// pins = [ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 ];
+			// pinsFormation.push( pins );
+
+			pins = [ 0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 ];
+			pinsFormation.push( pins );
+
+			// pins = [ 0 ];
+			// pinsFormation.push( pins );
+
+			// pins = []; // cut the rope ;)
+			// pinsFormation.push( pins );
+
+			// pins = [ 0, cloth.w ]; // classic 2 pins
+			// pinsFormation.push( pins );
+
+			// pins = [ - cloth.w, cloth.w ]; // both sides top
+			// pinsFormation.push( pins );
+
+			// pins = [ 100, cloth.w ]; // both sides top
+			// pinsFormation.push( pins );
+
+			pins = pinsFormation[ 0 ];
+
+			function togglePins() {
+
+				pins = pinsFormation[ ~ ~ ( Math.random() * pinsFormation.length ) ];
+
+			}
+
+			// 
+
+			// model loader progress
+
+			function onProgress( xhr ) {
+
+				if ( xhr.lengthComputable ) {
+
+					var percentComplete = xhr.loaded / xhr.total * 100;
+					console.log( Math.round( percentComplete, 2 ) + '% downloaded' );
+
+				}
+
+			}
+
+			var startButton = document.getElementById( 'startButton' );
+			startButton.addEventListener( 'click', function () {
+
+				Ammo().then( function () {
+
+					init();
+					animate( 0 );
+
+				} );
+
+			} );
+
+
+			var container, stats, controls;
+			var camera, cameraTarget, scene, renderer, light;
+			var clothGeometry;
+			var sphere;
+			var object;
+			var pos;
+			var helper;
+
+			var clock = new THREE.Clock();
+
+			var mixer, mixer1;
+
+			var z_res = "add";
+			var y_res = "add";
+			var x_res = "add";
+
+			var audioFile = 'models/mmd/audios/Bass-(Lo-fi-Hip_Hop)-Boosted_Relaxing_Cill-No-copyright ( 128kbps ).mp3';
+			var audioParams = { delayTime: 0 };
+			helper = new MMDAnimationHelper();
+
+			var ready = false;
+
+			function init() {
+				var overlay = document.getElementById( 'overlay' );
+				overlay.remove();
+
+				container = document.createElement( 'div' );
+				document.body.appendChild( container );
+
+				camera = new THREE.PerspectiveCamera( 60, window.innerWidth / window.innerHeight, 1, 50000 );
+				camera.position.set( 0, 250, 400 );
+
+				cameraTarget = new THREE.Vector3( 500, 100, 0  );
+
+				scene = new THREE.Scene();
+				scene.background = new THREE.Color( 0x000000 );
+				scene.fog = new THREE.Fog( 0xa1a0a0, 800, 20000 );
+
+				light = new THREE.HemisphereLight( 0xffffff, 0x444444 );
+				light.position.set( 0, 200, 0 );
+				scene.add( light );
+
+				light = new THREE.DirectionalLight( 0xff9800 );
+				light.position.set( 0, 200, 100 );
+				light.castShadow = true;
+				light.shadow.camera.top = 180;
+				light.shadow.camera.bottom = - 100;
+				light.shadow.camera.left = - 120;
+				light.shadow.camera.right = 120;
+				scene.add( light );
+
+				// ground
+				var textureLoader = new THREE.TextureLoader();
+				var groundTexture = textureLoader.load( 'textures/terrain/grasslight-big.jpg' );
+				groundTexture.wrapS = groundTexture.wrapT = THREE.RepeatWrapping;
+				groundTexture.repeat.set( 25, 25 );
+				groundTexture.anisotropy = 16;
+				groundTexture.encoding = THREE.sRGBEncoding;
+
+				var groundMaterial = new THREE.MeshLambertMaterial( { map: groundTexture } );
+
+				var mesh = new THREE.Mesh( new THREE.PlaneBufferGeometry( 20000, 20000 ), groundMaterial );
+				mesh.position.y =  0;
+				mesh.rotation.x = - Math.PI / 2;
+				mesh.receiveShadow = true;
+				scene.add( mesh );
+
+				// LOGO
+				var logoMat = new THREE.MeshStandardMaterial( {
+					roughness: 1,
+					color: 0xffffff,
+					bumpScale: 0.02,
+					metalness: 0
+				} );
+
+				textureLoader.load( "textures/sd_logo/spinn_dessign_plain_logo.png", function ( map ) {
+
+					map.wrapS = THREE.RepeatWrapping;
+					map.wrapT = THREE.RepeatWrapping;
+					map.anisotropy = 30;
+					map.repeat.set( 1, 1 );
+					map.encoding = THREE.sRGBEncoding;
+					logoMat.map = map;
+					logoMat.needsUpdate = true;
+
+				} );
+
+				textureLoader.load( "textures/sd_logo/spinn_dessign_plain_logo.png", function ( map ) {
+
+					map.wrapS = THREE.RepeatWrapping;
+					map.wrapT = THREE.RepeatWrapping;
+					map.anisotropy = 30;
+					map.repeat.set( 1, 1 );
+					logoMat.bumpMap = map;
+					logoMat.needsUpdate = true;
+
+				} );
+
+				// Logo podium
+				var logoGeometry = new THREE.BoxBufferGeometry( 2500, 300, 2000 );				var logoMesh = new THREE.Mesh( logoGeometry, logoMat );
+				logoMesh.position.set( 0, 0, -100 );
+				logoMesh.castShadow = true;
+				scene.add( logoMesh );
+
+				var listener = new THREE.AudioListener();
+				var loader = new THREE.FontLoader();
+				loader.load( 'fonts/optimer_regular.typeface.json', function ( font ) {
+
+					var xMid, text;
+
+					var color = 0xca2121;
+
+					var matDark = new THREE.LineBasicMaterial( {
+						color: 0xffffff,
+						side: THREE.DoubleSide
+					} );
+
+					var matLite = new THREE.MeshBasicMaterial( {
+						color: color,
+						transparent: false,
+						opacity: 1,
+						side: THREE.DoubleSide
+					} );
+
+					var message = "   Spinn Design . Com";
+
+					var shapes = font.generateShapes( message, 400 );
+
+					var geometry = new THREE.ShapeBufferGeometry( shapes );
+
+					geometry.computeBoundingBox();
+
+					xMid = - 0.5 * ( geometry.boundingBox.max.x - geometry.boundingBox.min.x );
+
+					geometry.translate( xMid, 0, 0 );
+
+					// make shape ( N.B. edge view not visible )
+
+					text = new THREE.Mesh( geometry, matLite );
+					text.position.z = - 4900;
+					text.rotation.x = -100;
+					scene.add( text );
+
+					// make line shape ( N.B. edge view remains visible )
+
+					var holeShapes = [];
+
+					for ( var i = 0; i < shapes.length; i ++ ) {
+
+						var shape = shapes[ i ];
+
+						if ( shape.holes && shape.holes.length > 0 ) {
+
+							for ( var j = 0; j < shape.holes.length; j ++ ) {
+
+								var hole = shape.holes[ j ];
+								holeShapes.push( hole );
+
+							}
+
+						}
+
+					}
+
+					shapes.push.apply( shapes, holeShapes );
+
+					var lineText = new THREE.Object3D();
+
+					for ( var i = 0; i < shapes.length; i ++ ) {
+
+						var shape = shapes[ i ];
+
+						var points = shape.getPoints();
+						var geometry = new THREE.BufferGeometry().setFromPoints( points );
+
+						geometry.translate( xMid, 0, 0 );
+
+						var lineMesh = new THREE.Line( geometry, matDark );
+						lineText.add( lineMesh );
+
+					}
+
+					lineText.position.set(0, 0, -4900);
+					lineText.rotation.x = -100;
+
+					scene.add( lineText );
+
+
+					// Text2
+					var message = "   Just Imagine ! ";
+
+					var shapes = font.generateShapes( message, 800 );
+
+					var geometry = new THREE.ShapeBufferGeometry( shapes );
+
+					geometry.computeBoundingBox();
+
+					xMid = - 0.5 * ( geometry.boundingBox.max.x - geometry.boundingBox.min.x );
+
+					geometry.translate( xMid, 0, 0 );
+
+					// make shape ( N.B. edge view not visible )
+
+					var text1 = new THREE.Mesh( geometry, matLite );
+					text1.position.set(0, 0, 4900);
+					text1.rotation.y = 600;
+					text1.rotation.x = 100;
+					text1.rotation.z =  0.01;
+					scene.add( text1 );
+
+					// make line shape ( N.B. edge view remains visible )
+
+					var holeShapes = [];
+
+					for ( var i = 0; i < shapes.length; i ++ ) {
+
+						var shape = shapes[ i ];
+
+						if ( shape.holes && shape.holes.length > 0 ) {
+
+							for ( var j = 0; j < shape.holes.length; j ++ ) {
+
+								var hole = shape.holes[ j ];
+								holeShapes.push( hole );
+
+							}
+
+						}
+
+					}
+
+					shapes.push.apply( shapes, holeShapes );
+
+					var lineText1 = new THREE.Object3D();
+
+					for ( var i = 0; i < shapes.length; i ++ ) {
+
+						var shape = shapes[ i ];
+
+						var points = shape.getPoints();
+						var geometry = new THREE.BufferGeometry().setFromPoints( points );
+
+						geometry.translate( xMid, 0, 0 );
+
+						var lineMesh = new THREE.Line( geometry, matDark );
+						lineText1.add( lineMesh );
+
+					}
+
+					lineText1.position.set(0, 0, 4900);
+					lineText1.rotation.y = 600;
+					lineText1.rotation.x = 100;
+					lineText1.rotation.z =  0.01;
+
+					scene.add( lineText1 );
+
+				} ); //end load function
+
+				// Brick material
+				var cubeMat = new THREE.MeshStandardMaterial( {
+					roughness: 0.7,
+					color: 0xffffff,
+					bumpScale: 0.002,
+					metalness: 0.2
+				} );
+
+				textureLoader.load( "textures/material/brick_diffuse.jpg", function ( map ) {
+
+					map.wrapS = THREE.RepeatWrapping;
+					map.wrapT = THREE.RepeatWrapping;
+					map.anisotropy = 10;
+					map.repeat.set( 20, 3 );
+					map.encoding = THREE.sRGBEncoding;
+					cubeMat.map = map;
+					cubeMat.needsUpdate = true;
+
+				} );
+
+				textureLoader.load( "textures/material/brick_bump.jpg", function ( map ) {
+
+					map.wrapS = THREE.RepeatWrapping;
+					map.wrapT = THREE.RepeatWrapping;
+					map.anisotropy = 10;
+					map.repeat.set( 20, 3 );
+					cubeMat.bumpMap = map;
+					cubeMat.needsUpdate = true;
+
+				} );
+
+				// Walls
+				var boxGeometry = new THREE.BoxBufferGeometry( 10000, 1500, 50 );
+
+				var boxMesh = new THREE.Mesh( boxGeometry, cubeMat );
+				boxMesh.position.set( 0, 0, -5000 );
+				boxMesh.castShadow = true;
+				scene.add( boxMesh );
+
+				var boxMesh2 = new THREE.Mesh( boxGeometry, cubeMat );
+				boxMesh2.position.set( 0, 0, 5000 );
+				boxMesh2.castShadow = true;
+				scene.add( boxMesh2 );
+
+				var boxGeometry1 = new THREE.BoxBufferGeometry( 50, 1500, 20000 );
+
+				var boxMesh1 = new THREE.Mesh( boxGeometry1, cubeMat );
+				boxMesh1.position.set( -5000, 0, 0 );
+				boxMesh1.castShadow = true;
+				scene.add( boxMesh1 );
+
+				var boxMesh3 = new THREE.Mesh( boxGeometry1, cubeMat );
+				boxMesh3.position.set( 5000, 0, 0 );
+				boxMesh3.castShadow = true;
+				scene.add( boxMesh3 );
+
+				// model
+				var loader = new FBXLoader();
+				loader.load( 'models/fbx/Samba Dancing.fbx', function ( object ) {
+
+					mixer = new THREE.AnimationMixer( object );
+
+					var action = mixer.clipAction( object.animations[ 0 ] );
+					action.play();
+
+					object.traverse( function ( child ) {
+
+						if ( child.isMesh ) {
+
+							child.castShadow = true;
+							child.receiveShadow = true;
+
+						}
+
+					} );
+
+					object.scale.set( 4, 4, 4 );
+					object.position.set( 0, 150, 0 );
+
+					scene.add( object );
+
+				} );
+
+				var loader = new ColladaLoader();
+				loader.load( './models/collada/stormtrooper/stormtrooper.dae', function ( collada ) {
+
+					var animations = collada.animations;
+					var avatar = collada.scene;
+
+					avatar.traverse( function ( node ) {
+
+						if ( node.isSkinnedMesh ) {
+
+							node.frustumCulled = false;
+
+						}
+
+						if ( node.isMesh ) {
+
+							node.castShadow = true;
+							node.receiveShadow = true;
+
+						}
+
+					} );
+
+					avatar.scale.set( 125, 125, 125 );
+					//avatar.rotation.x = 0;
+					//avatar.rotation.y = 0;
+					avatar.rotation.z = 90;
+					avatar.position.set( 500, 150, 0 );
+
+					mixer1 = new THREE.AnimationMixer( avatar );
+					mixer1.clipAction( animations[ 0 ] ).play();
+
+					scene.add( avatar );
+
+				} );
+
+				// SkyBox
+				let materialArray = [];
+		        let texture_ft = new THREE.TextureLoader().load( 'penguins-skybox-pack/penguins (36)/trance_ft.jpg');
+		        let texture_bk = new THREE.TextureLoader().load( 'penguins-skybox-pack/penguins (36)/trance_bk.jpg');
+		        let texture_up = new THREE.TextureLoader().load( 'penguins-skybox-pack/penguins (36)/trance_up.jpg');
+		        let texture_dn = new THREE.TextureLoader().load( 'penguins-skybox-pack/penguins (36)/trance_dn.jpg');
+		        let texture_rt = new THREE.TextureLoader().load( 'penguins-skybox-pack/penguins (36)/trance_rt.jpg');
+		        let texture_lf = new THREE.TextureLoader().load( 'penguins-skybox-pack/penguins (36)/trance_lf.jpg');
+		          
+		        materialArray.push(new THREE.MeshBasicMaterial( { map: texture_ft }));
+		        materialArray.push(new THREE.MeshBasicMaterial( { map: texture_bk }));
+		        materialArray.push(new THREE.MeshBasicMaterial( { map: texture_up }));
+		        materialArray.push(new THREE.MeshBasicMaterial( { map: texture_dn }));
+		        materialArray.push(new THREE.MeshBasicMaterial( { map: texture_rt }));
+		        materialArray.push(new THREE.MeshBasicMaterial( { map: texture_lf }));
+		   
+		        for (let i = 0; i < 6; i++)
+		           materialArray[i].side = THREE.BackSide;
+
+		        let skyboxGeo = new THREE.BoxGeometry( 10000, 10000, 10000);
+		        let skybox = new THREE.Mesh( skyboxGeo, materialArray );
+		        scene.add( skybox );
+
+
+				// cloth material
+				var clothTexture = textureLoader.load( 'textures/sd_logo/night_mode_3d_spinn_design.png' );
+				clothTexture.anisotropy = 40;
+
+				var clothMaterial = new THREE.MeshLambertMaterial( {
+					map: clothTexture,
+					side: THREE.DoubleSide,
+					alphaTest: 0.5
+				} );
+
+
+				// cloth geometry
+				clothGeometry = new THREE.ParametricBufferGeometry( clothFunction, cloth.w, cloth.h );
+
+				// cloth mesh
+				object = new THREE.Mesh( clothGeometry, clothMaterial );
+				object.position.set( 100, 1000, 0 );
+				object.castShadow = true;
+				scene.add( object );
+
+				object.customDepthMaterial = new THREE.MeshDepthMaterial( {
+					depthPacking: THREE.RGBADepthPacking,
+					map: clothTexture,
+					alphaTest: 0.5
+				} );
+
+				// poles
+				var poleGeo = new THREE.BoxBufferGeometry( 50, 4000, 50 );
+				var poleMat = new THREE.MeshLambertMaterial();
+
+				var mesh = new THREE.Mesh( poleGeo, poleMat );
+				mesh.position.x = - 3000;
+				mesh.position.y = - 50;
+				mesh.receiveShadow = true;
+				mesh.castShadow = true;
+				scene.add( mesh );
+
+				var mesh = new THREE.Mesh( poleGeo, poleMat );
+				mesh.position.x = 3000;
+				mesh.position.y = - 50;
+				mesh.receiveShadow = true;
+				mesh.castShadow = true;
+				scene.add( mesh );
+
+				var mesh = new THREE.Mesh( new THREE.BoxBufferGeometry( 6000, 50, 50 ), poleMat );
+				mesh.position.y = 1930;
+				mesh.position.x = 0;
+				mesh.receiveShadow = true;
+				mesh.castShadow = true;
+				scene.add( mesh );
+
+				var gg = new THREE.BoxBufferGeometry( 100, 100, 100 );
+				var mesh = new THREE.Mesh( gg, poleMat );
+				mesh.position.y = 0;
+				mesh.position.x = 3000;
+				mesh.receiveShadow = true;
+				mesh.castShadow = true;
+				scene.add( mesh );
+
+				var mesh = new THREE.Mesh( gg, poleMat );
+				mesh.position.y = 0;
+				mesh.position.x = - 3000;
+				mesh.receiveShadow = true;
+				mesh.castShadow = true;
+				scene.add( mesh );
+
+				// Audio
+				new THREE.AudioLoader().load( audioFile, function ( buffer ) {
+
+					var audio = new THREE.Audio( listener ).setBuffer( buffer );
+
+					helper.add( audio, audioParams );
+					scene.add( mesh );
+
+					ready = true;
+
+				}, onProgress, null );
+				
+				 // Renderer
+				renderer = new THREE.WebGLRenderer( { antialias: true } );
+				renderer.setPixelRatio( window.devicePixelRatio );
+				renderer.setSize( window.innerWidth, window.innerHeight );
+				renderer.shadowMap.enabled = true;
+				container.appendChild( renderer.domElement );
+
+				// Orbit controllers
+				// controls = new OrbitControls( camera, renderer.domElement );
+				// controls.target.set( 0, 0, 0 );
+				// controls.update();
+
+				window.addEventListener( 'resize', onWindowResize, false );
+
+				//
+
+				if ( typeof TESTING !== 'undefined' ) { for ( var i = 0; i < 50; i ++ ) { simulate( 500 - 10 * i ); }; };
+
+			}
+
+			function onWindowResize() {
+
+				camera.aspect = window.innerWidth / window.innerHeight;
+				camera.updateProjectionMatrix();
+
+				renderer.setSize( window.innerWidth, window.innerHeight );
+
+			}
+
+			//
+
+			function animate( now ) {
+				requestAnimationFrame( animate );
+				simulate( now );
+				render();
+
+				var delta = clock.getDelta();
+
+				if ( mixer ) mixer.update( delta );
+				if ( mixer1 ) mixer1.update( delta );
+
+				var timer = Date.now() * 0.0005;
+
+				if (camera.position.x > 1000) {
+					x_res = "sub";					
+				}else if (camera.position.z < 500){
+					x_res = "add";
+				}
+
+				if (x_res === "add") {
+					if (camera.position.x < 500) {
+						camera.position.x = camera.position.x + 3;
+					}else{
+						camera.position.x = camera.position.x + 2;
+					}
+				}else{
+					if (camera.position.x > -1000) {
+						camera.position.x = camera.position.x - 5;
+					}else{
+						camera.position.x = camera.position.x + 2;
+						x_res = "add";
+					}
+				}				
+
+				if (camera.position.y > 5000) {
+					y_res = "sub";					
+				}else if (camera.position.z < 500){
+					y_res = "add";
+				}
+
+				if (y_res === "add") {
+					if (camera.position.y > 1000) {
+						camera.position.y = camera.position.y + 5;
+					}else{
+						camera.position.y = camera.position.y + 1;
+					}
+				}else{
+					if (camera.position.y > 200) {
+						camera.position.y = camera.position.y - 5;
+					}else{
+						camera.position.y = camera.position.y + 1;
+						y_res = "add";
+					}					
+				}
+
+				if (camera.position.z > 4000) {
+					z_res = "sub";					
+				}else if (camera.position.z < -4000){
+					z_res = "add";
+				}
+
+				if (z_res === "add") {
+					camera.position.z = camera.position.z + 7;
+				}else{
+					camera.position.z = camera.position.z - 7;
+				}
+				
+				
+				//console.log(camera.position.x, camera.position.y, camera.position.z)
+
+				camera.lookAt( cameraTarget );
+
+				renderer.render( scene, camera );
+
+				//stats.update();
+
+			}
+
+			// 
+			function render() {
+
+				if ( ready ) {
+
+					helper.update( clock.getDelta() );
+
+				}
+
+				var p = cloth.particles;
+
+				for ( var i = 0, il = p.length; i < il; i ++ ) {
+
+					var v = p[ i ].position;
+
+					clothGeometry.attributes.position.setXYZ( i, v.x, v.y, v.z );
+
+				}
+
+				clothGeometry.attributes.position.needsUpdate = true;
+
+				clothGeometry.computeVertexNormals();
+
+				renderer.render( scene, camera );
+
+			}
+
+		</script>
+
+	</body>
+</html>
+<style type="text/css">
+	.sd_pages_flt_cont{
+		position: fixed;
+		bottom: 10px;
+		right: 10px;
+		background: rgba(0,0,0,.3);
+		padding: 10px;
+		cursor: pointer;
+		font-weight: bold;
+		color: #fff !important;
+		border-radius: 10px;
+		box-shadow: 0 0 20px #000;
+	}
+	.sd_pages_flt_cont a{
+		text-decoration: none;
+		color: inherit;
+	}
+	.sd_pages_flt_cont ul{
+		display: none;
+	}
+	.sd_pages_flt_cont ul li{
+		margin: 5px auto;
+		padding: 5px;
+		background: #fff;
+		color: #000;
+	}
+	.sd_pages_flt_cont:hover ul{
+		display: list-item;
+		position: absolute;
+		bottom: 0;
+		min-width: 100%;
+		padding: inherit;
+		right: 0;
+		list-style: none;
+		background: inherit;
+		font-weight: normal;
+		background: rgba(0,0,0,.9);
+		padding: 5px 10px;
+		margin: 15px auto;
+	}
+	 .sd_pages_flt_cont:hover div{
+	 	display: inline-block;
+	 }
+</style>
+<div class="sd_pages_flt_cont">
+	<div>
+		<div style="color: #000">< / ></div>
+		<ul>
+			<li><u><b>Powered By Spinn Design</b></u></li>
+		   <li><b><a href="https://www.spinndesign.com" target="_blank">Spinn Design <i class="fas fa-home"></i> Home</a></b></li>
+		   <li id="sd_el_href"></li> 
+		   <li>
+		   		<span class="more"><b>Disclaimer:</b> Spinn Design is not a web hosting service and all contents available in domains https://spinndesign.com/pages/... is totally up to files uploader's controll.</span><br>
+		   		<span class="more">Report any misconduct you notice to <b>info@spinndesign.com</b></span><br><hr>
+		   		<h6>Copyright Spinn Design 2020</h6>
+		   </li>
+		</ul>
+	</div>
+</div>
+
+<script type="text/javascript">
+	var id = location.pathname.slice(1).split("/")[1];
+	var ur = "https://www.spinndesign.com/designs/"+id;
+	var el = document.getElementById('sd_el_href');
+	el.innerHTML = `<a href="${ur}">Download Page Source</a>`;
+</script><!-- Global site tag (gtag.js) - Google Analytics -->
+																		    <script async src='https://www.googletagmanager.com/gtag/js?id=UA-169054170-1'></script>
+																		    <script>
+																		      window.dataLayer = window.dataLayer || [];
+																		      function gtag(){dataLayer.push(arguments);}
+																		      gtag('js', new Date());
+
+																		      gtag('config', 'UA-169054170-1');
+																		    </script><style type="text/css">
+	.sd_pages_flt_cont{
+		position: fixed;
+		bottom: 10px;
+		right: 10px;
+		background: rgba(0,0,0,.3);
+		padding: 10px;
+		cursor: pointer;
+		font-weight: bold;
+		color: #fff !important;
+		border-radius: 10px;
+		box-shadow: 0 0 20px #000;
+	}
+	.sd_pages_flt_cont a{
+		text-decoration: none;
+		color: inherit;
+	}
+	.sd_pages_flt_cont ul{
+		display: none;
+	}
+	.sd_pages_flt_cont ul li{
+		margin: 5px auto;
+		padding: 5px;
+		background: #fff;
+		color: #000;
+	}
+	.sd_pages_flt_cont:hover ul{
+		display: list-item;
+		position: absolute;
+		bottom: 0;
+		min-width: 100%;
+		padding: inherit;
+		right: 0;
+		list-style: none;
+		background: inherit;
+		font-weight: normal;
+		background: rgba(0,0,0,.9);
+		padding: 5px 10px;
+		margin: 15px auto;
+	}
+	 .sd_pages_flt_cont:hover div{
+	 	display: inline-block;
+	 }
+</style>
+<div class="sd_pages_flt_cont">
+	<div>
+		<div style="color: #000">< / ></div>
+		<ul>
+			<li><u><b>Powered By Spinn Design</b></u></li>
+		   <li><b><a href="https://www.spinndesign.com" target="_blank">Spinn Design <i class="fas fa-home"></i> Home</a></b></li>
+		   <li id="sd_el_href"></li> 
+		   <li>
+		   		<span class="more"><b>Disclaimer:</b> Spinn Design is not a web hosting service and all contents available in domains https://spinndesign.com/pages/... is totally up to files uploader's controll.</span><br>
+		   		<span class="more">Report any misconduct you notice to <b>info@spinndesign.com</b></span><br><hr>
+		   		<h6>Copyright Spinn Design 2020</h6>
+		   </li>
+		</ul>
+	</div>
+</div>
+
+<script type="text/javascript">
+	var id = location.pathname.slice(1).split("/")[1];
+	var ur = "https://www.spinndesign.com/designs/"+id;
+	var el = document.getElementById('sd_el_href');
+	el.innerHTML = `<a href="${ur}">Download Page Source</a>`;
+</script><!-- Global site tag (gtag.js) - Google Analytics -->
+																		    <script async src='https://www.googletagmanager.com/gtag/js?id=UA-169054170-1'></script>
+																		    <script>
+																		      window.dataLayer = window.dataLayer || [];
+																		      function gtag(){dataLayer.push(arguments);}
+																		      gtag('js', new Date());
+
+																		      gtag('config', 'UA-169054170-1');
+																		    </script>
