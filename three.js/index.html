@@ -495,7 +495,8 @@
 				} );
 
 				// Logo podium
-				var logoGeometry = new THREE.BoxBufferGeometry( 2500, 300, 2000 );				var logoMesh = new THREE.Mesh( logoGeometry, logoMat );
+				var logoGeometry = new THREE.BoxBufferGeometry( 2500, 300, 2000 );				
+				var logoMesh = new THREE.Mesh( logoGeometry, logoMat );
 				logoMesh.position.set( 0, 0, -100 );
 				logoMesh.castShadow = true;
 				scene.add( logoMesh );
@@ -863,17 +864,35 @@
 				mesh.castShadow = true;
 				scene.add( mesh );
 
-				// Audio
-				new THREE.AudioLoader().load( audioFile, function ( buffer ) {
+				// LOAD AUDIO
+				var listener = new THREE.AudioListener();
+				var audio = new THREE.Audio( listener );
+				
+				//var file = './copyrighted/Jason Derulo - Take You Dancing _Official Dance Video_ ( 128kbps ).mp3';
+				var file = './models/mmd/audios/Righten - Dynamo.m4a';
 
-					var audio = new THREE.Audio( listener ).setBuffer( buffer );
+				// PLAY AUDIO FILE
+				if ( /(iPad|iPhone|iPod)/g.test( navigator.userAgent ) ) {
 
-					helper.add( audio, audioParams );
-					scene.add( mesh );
+					var loader = new THREE.AudioLoader();
+					loader.load( file, function ( buffer ) {
 
-					ready = true;
+						audio.setBuffer( buffer );
 
-				}, onProgress, null );
+						audio.play();
+
+					} );
+
+				} else {
+
+					var mediaElement = new Audio( file );
+					mediaElement.loop = true;
+
+					mediaElement.play();
+
+					audio.setMediaElementSource( mediaElement );
+
+				}
 				
 				 // Renderer
 				renderer = new THREE.WebGLRenderer( { antialias: true } );
@@ -909,14 +928,13 @@
 			function animate( now ) {
 				requestAnimationFrame( animate );
 				simulate( now );
-				render();
 
 				var delta = clock.getDelta();
 
-				if ( mixer ) mixer.update( delta );
+				if ( mixer ) mixer.update( delta  * 1.25);
 				if ( mixer1 ) mixer1.update( delta );
 
-				var timer = Date.now();
+				var time = Date.now() * 0.001;
 
 				if (camera.position.x > 1000) {
 					x_res = "sub";					
@@ -981,6 +999,8 @@
 
 				//stats.update();
 
+				render();
+
 			}
 
 			// 
@@ -988,7 +1008,7 @@
 
 				if ( ready ) {
 
-					helper.update( clock.getDelta() );
+					helper.update( clock.getDelta());
 
 				}
 
